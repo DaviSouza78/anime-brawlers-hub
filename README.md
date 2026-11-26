@@ -5,7 +5,8 @@ Menu Rayfield Gen2 para Anime Brawlers Simulator (place `117337409758030`).
 ## Carregar no Real
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/DaviSouza78/anime-brawlers-hub/main/anime-brawlers-hub.luau"))()
+local url = "https://raw.githubusercontent.com/DaviSouza78/anime-brawlers-hub/main/anime-brawlers-hub.luau"
+loadstring(game:HttpGet(url .. "?t=" .. tostring(os.time())))()
 ```
 
 ## Auto Fuse
