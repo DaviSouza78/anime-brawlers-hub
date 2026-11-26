@@ -429,7 +429,8 @@ local invConsole = invTab:CreateText({name = "Resumo da equipe", text = "Carrega
 -- BEGIN AUTO FUSE CONTROLLER
 local function createFuseController(adapters)
     local c: any = {Pending = nil, Blocked = false, NextAt = 0, Batches = 0,
-        MaterialsUsed = 0, Status = "Desligado"}
+        MaterialsUsed = 0, Status = "Desligado", SyncSerial = 0, SyncInFlight = false,
+        SyncOK = true, NextSyncAt = 0, RecoveryCount = 0, SyncFailures = 0}
     function c:Plan(v)
         local plan: any = {Target = nil, UIDs = {}, Materials = {}, XP = 0, Eligible = 0,
             Status = "Selecione o boneco que recebera XP"}
@@ -472,7 +473,28 @@ local function createFuseController(adapters)
         adapters.pause(message)
     end
     function c:ResetAfterSync()
+        self.SyncSerial += 1
+        self.SyncOK = true
+        self.RecoveryCount, self.SyncFailures = 0, 0
         if self.Blocked then self.Pending = nil; self.Blocked = false end
+    end
+    function c:RequestSync(now)
+        if self.SyncInFlight or now < self.NextSyncAt then return end
+        self.SyncInFlight = true
+        self.NextSyncAt = now + 3
+        adapters.sync(function(ok)
+            self.SyncInFlight = false
+            self.SyncSerial += 1
+            self.SyncOK = ok == true
+        end)
+    end
+    function c:OnResult(ok, message, data, tag)
+        local pending = self.Pending
+        if not pending or tag ~= "FighterFeed" then return end
+        if type(data) == "table" and data.TargetUID and data.TargetUID ~= pending.TargetUID then return end
+        pending.ResultSeen = true
+        pending.ResultOK = ok == true
+        pending.Message = tostring(message or "Fusao recusada pelo servidor")
     end
     function c:Step(v)
         if self.Pending then
@@ -482,7 +504,9 @@ local function createFuseController(adapters)
                 if f.UID == self.Pending.TargetUID then target = f end
             end
             if not target then
-                if not self.Blocked then self:Fail("Destino ausente; atualize o inventario") end
+                if self.SyncSerial > self.Pending.SyncSerial and self.SyncOK then
+                    if not self.Blocked then self:Fail("Destino ausente; selecione outro boneco") end
+                else self:RequestSync(v.Clock) end
                 return
             end
             local remaining = 0
@@ -492,11 +516,33 @@ local function createFuseController(adapters)
                 self.MaterialsUsed += #self.Pending.UIDs
                 adapters.log("Fuse confirmado: " .. #self.Pending.UIDs .. " materiais -> " .. tostring(target.Name))
                 self.Pending = nil
+                self.RecoveryCount, self.SyncFailures = 0, 0
             else
                 if self.Blocked then return end
                 self.Status = "Aguardando confirmacao do servidor"
-                if v.Clock - self.Pending.SentAt >= 15 and not self.Blocked then
-                    self:Fail("Fuse sem confirmacao; atualize o inventario antes de reativar")
+                if self.SyncSerial > self.Pending.SyncSerial then
+                    if self.SyncOK then
+                        local removed = #self.Pending.UIDs - remaining
+                        if removed > 0 then
+                            self.MaterialsUsed += removed
+                            adapters.log("Fuse: inventario sincronizado; " .. removed .. " materiais removidos")
+                        end
+                        local message = self.Pending.Message
+                        self.Pending = nil
+                        self.RecoveryCount = if removed > 0 then 0 else self.RecoveryCount + 1
+                        self.NextAt = v.Clock + math.min(8, self.RecoveryCount + 1)
+                        self.Status = "Inventario sincronizado; aguardando proxima tentativa"
+                        if self.RecoveryCount >= 5 then self:Fail(message or "O servidor nao aplicou a fusao apos 5 tentativas") end
+                    else
+                        self.Pending.SyncSerial = self.SyncSerial
+                        self.SyncFailures += 1
+                        if self.SyncFailures >= 3 then self:Fail("Falha de conexao ao consultar o inventario") end
+                    end
+                    return
+                end
+                if self.Pending.ResultSeen or v.Clock - self.Pending.SentAt >= 3 then
+                    self.Status = "Sincronizando inventario automaticamente"
+                    self:RequestSync(v.Clock)
                 end
                 return
             end
@@ -504,6 +550,7 @@ local function createFuseController(adapters)
         if self.Blocked then return end
         if not v.Enabled and not v.Manual then self.Status = "Desligado"; return end
         if v.Paused then self.Status = "Pausado durante trial / carregamento"; return end
+        if v.Rolling then self.Status = "Aguardando intervalo entre as aberturas"; return end
         local plan = self:Plan(v)
         self.Status = plan.Status
         if not plan.Target then
@@ -512,7 +559,7 @@ local function createFuseController(adapters)
         end
         if plan.Stop then adapters.pause(plan.Status); return end
         if #plan.UIDs == 0 or v.Clock < self.NextAt then return end
-        self.Pending = {TargetUID = plan.Target.UID, UIDs = plan.UIDs, SentAt = v.Clock}
+        self.Pending = {TargetUID = plan.Target.UID, UIDs = plan.UIDs, SentAt = v.Clock, SyncSerial = self.SyncSerial}
         self.NextAt = v.Clock + math.max(3, tonumber(v.Interval) or 5)
         self.Status = "Enviando " .. #plan.UIDs .. " materiais para " .. tostring(plan.Target.Name)
         adapters.send(plan.Target.UID, plan.UIDs)
@@ -531,6 +578,17 @@ local function pauseFuse(message)
 end
 hub.Fuse = createFuseController({
     send = function(targetUID, materialUIDs) send("Fuse", targetUID, materialUIDs) end,
+    sync = function(done)
+        task.spawn(function()
+            local ok, data = pcall(function() return remotes.GetSnapshot:InvokeServer() end)
+            if not hub.Alive then return end
+            local valid = ok and type(data) == "table" and type(data.Inventory) == "table"
+            if valid and (not snapshot.SnapshotVersion or not data.SnapshotVersion or data.SnapshotVersion >= snapshot.SnapshotVersion) then
+                snapshot = data; hub.Snapshot = data
+            end
+            done(valid)
+        end)
+    end,
     pause = pauseFuse,
     log = function(message) log:Append(message) end,
 })
@@ -539,7 +597,8 @@ local function fuseView(now, paused)
         Rarities = options.fuseRarities, IncludeShiny = options.fuseShiny,
         BatchSize = options.fuseBatch, MaxLevel = config.Game.MaxFighterLevel or 70,
         Interval = options.fuseInterval, Enabled = options.autoFuse,
-        Manual = hub.ManualFuse == true, Paused = paused == true}
+        Manual = hub.ManualFuse == true, Paused = paused == true,
+        Rolling = player:GetAttribute("StarDropInProgress") == true or reveal.IsPlaying()}
 end
 hub.FuseView = fuseView
 local targetUIDByLabel, targetLabelByUID = {}, {}
@@ -618,7 +677,7 @@ local function refreshFuseSummary()
     fuseSummary:Set(table.concat(lines, "\n"))
 end
 hub.RefreshFuse = refreshFuseSummary
-button(fuseTab, "Atualizar inventario / liberar nova tentativa", function()
+button(fuseTab, "Atualizar inventario", function()
     task.spawn(function()
         local ok, data = pcall(function() return remotes.GetSnapshot:InvokeServer() end)
         if not hub.Alive then return end
@@ -736,6 +795,7 @@ connect(remotes.SnapshotChanged.OnClientEvent, acceptSnapshot)
 local pending, lastOpen, retryAfter = false, -math.huge, 0
 local rarityRank = {Common = 1, Rare = 2, Epic = 3, Legendary = 4, Mythical = 5, Secret = 6}
 connect(remotes.ActionResult.OnClientEvent, function(ok, message, data, tag)
+    hub.Fuse:OnResult(ok, message, data, tag)
     if tag == "StarOpen" then
         pending = false
         if ok and type(data) == "table" then
