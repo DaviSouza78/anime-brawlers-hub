@@ -14,7 +14,7 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/DaviSouza78/anime-bra
 2. Selecione uma ou mais raridades usadas como material e confira a previa.
 3. Ative **Ativar Auto Fuse**, ou use **Fundir um lote agora**.
 
-Equipados, travados, o inicial e o destino nunca sao usados como material. Shinies exigem ativacao explicita. A fusao aguarda confirmacao do inventario antes de enviar outro lote, pausa na trial e para no nivel maximo. Materiais consumidos pela fusao sao removidos pelo jogo.
+Equipados, travados, o inicial e o destino nunca sao usados como material. Shinies exigem ativacao explicita. A fusao aguarda o intervalo das animacoes de abertura e confirma o resultado no inventario. Se a resposta atrasar ou o servidor recusar um pedido, consulta o inventario automaticamente e recalcula os materiais antes de tentar novamente. Pausa na trial e para no nivel maximo. Materiais consumidos pela fusao sao removidos pelo jogo.
 
 O menu inclui tambem Auto Attack, autofarm, auto open, Auto Trial, equipe, missoes e ajustes de desempenho. As automacoes iniciam desligadas. **F8** para os proximos lotes e as automacoes; **Right Ctrl** mostra/esconde o menu.
 
@@ -22,4 +22,4 @@ Execute novamente apos trocar de servidor. O codigo depende das interfaces do jo
 
 ## Validacao
 
-Auto Fuse: onze testes deterministas de selecao, protecoes e controle de pedidos passaram. A interface e a previa foram verificadas no cliente v3417. Nenhum material real foi consumido durante esses testes.
+Auto Fuse: dezesseis testes deterministas de selecao, protecoes, respostas e recuperacao passaram. Fusions reais confirmadas no cliente v3417, incluindo um lote de 15 materiais destinado ao Kiari. A recuperacao nao reenviara um lote sem consultar primeiro o estado atual do inventario.
